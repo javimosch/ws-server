@@ -17,17 +17,42 @@ app.use(express.json());
 
 // Middleware to validate origin
 app.use((req, res, next) => {
-  const clientIp = req.ip || req.connection.remoteAddress;
-  // Handle IPv6-mapped IPv4 addresses by converting them to IPv4 format
-  const ipv4 = clientIp.replace('::ffff:', '');
-  const isLocalhost = ipv4 === '127.0.0.1' || clientIp === '::1';
-  const isDockerInternal = ipv4.startsWith('172.') || ipv4.startsWith('192.168.');
-  const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
-  
-  if (!isLocalhost && !isDockerInternal && !allowedOrigins.includes(req.get('origin'))) {
-    console.log(`Unauthorized access attempt from IP: ${clientIp}`);
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (req.path === '/emit') {
+    const allowedReferers = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
+    const referer = req.get('referer') || req.get('origin') || req.ip; //if no referer we assume trigger was a backend: In that case, grab the IP
+
+    if (allowedReferers.includes('*')) {
+      console.log(`Authorized access attempt from referer: ${referer} (whitelisted due to *)`);
+      return next();
+    } else if (referer && allowedReferers.some(allowed => referer.startsWith(allowed))) {
+      console.log(`Authorized access attempt from referer: ${referer} (whitelisted)`);
+      return next();
+    }
+
+    if (process.env.API_KEY) {
+      const authHeader = req.get('Authorization');
+      if (!authHeader) {
+        console.log(`Unauthorized access attempt: No Authorization header provided`);
+        return res.status(401).json({ error: 'Unauthorized - API key required' });
+      }
+
+      const apiKey = authHeader.replace('Bearer ', '');
+      const validKeys = (process.env.API_KEY||"").split(',');
+      if (validKeys.includes(apiKey)) {
+        console.log(`Authorized access attempt (API key matched)`);
+        return next();
+      } else {
+        console.log(`Unauthorized access attempt (API key provided but does not match)`);
+        return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+      }
+    } else {
+      console.log(`Unauthorized access attempt (API key not configured)`, {
+        allowedReferers
+      });
+      return res.status(401).json({ error: 'Unauthorized - No API key configured' });
+    }
   }
+
   next();
 });
 
@@ -44,9 +69,9 @@ app.get('/health', (req, res) => {
 wss.on('connection', (ws) => {
   const clientId = Math.random().toString(36).substring(7);
   clients.set(clientId, ws);
-  
+
   console.log(`Client connected with ID: ${clientId}`);
-  
+
   // Send the clientId to the client
   ws.send(JSON.stringify({ type: 'connection', clientId }));
 
@@ -89,7 +114,7 @@ app.post('/emit', (req, res) => {
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) return ws.terminate();
-    
+
     ws.isAlive = false;
     ws.ping();
   });
